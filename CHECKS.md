@@ -80,7 +80,7 @@ If a job level has no NT row at all, every rule that needs the baseline reports
 | `PL` | must be 0 | = NT |
 | `WELLB` | not checked | = NT |
 | `COMLEA` | not checked | = NT |
-| `PHNW` | must be 0 | = NT × 2.5 |
+| `PHNW` | must be 0 | = NT |
 | `RDO<n>+<n>` | must be 0 | = NT |
 | `RDOACC<n>+<n>` | must be 0 | = −NT |
 
@@ -93,9 +93,9 @@ Applied to every row regardless of pay item:
 
 ### Comparison details
 
-- **Tolerance.** Two rates within 0.0051 count as equal, so rounding to the cent passes:
-  2.5 × 16.91 = 42.275 stored as `42.28` is accepted. Change `TOL` at the top of the module
-  to tighten or loosen this.
+- **Tolerance.** Two rates within 0.0051 count as equal, so a rate stored to fewer decimal
+  places than the NT rate it is compared against still passes. Change `TOL` at the top of the
+  module to tighten or loosen this.
 - **Blank rates count as zero.** A blank employee or client rate is treated as 0, not skipped.
 - **Zero-client rules are exact.** "Must be 0" is tested exactly, with no tolerance.
 
@@ -116,10 +116,7 @@ shaded yellow. Both shadings are cleared at the start of the next run.
 
 - **Not yet run against the source export.** The logic was written from an inspection of the
   data, not verified by execution.
-- **`PHNW` will likely produce many errors.** In the sampled rows its employee rate equals the
-  NT rate rather than 2.5 × NT. Whether the data or the rule is wrong is a question for the
-  award, not the tool.
-- **The workbook is modified in place.** Step 1 writes to column R and clears column T. Keep a
-  copy of the original export.
+- **The workbook is modified in place.** The cleanse writes to column R and clears column T.
+  Keep a copy of the original export.
 - **`RDOCO` (RDO Cash Out) is not covered** by the RDO rules — it has no `<n>+<n>` suffix. Only
   the general client-vs-employee check applies to it.

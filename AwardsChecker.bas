@@ -30,8 +30,8 @@ Private Const COL_CLIENT As Long = 19    ' S  PAY_CLIENTRATE
 Private Const COL_ADD As Long = 20       ' T  PAY_ADDITIONS
 Private Const LAST_COL As Long = 21      ' U  PAY_DEDUCTIONS
 
-' Two rates within half a cent are treated as equal (allows rounding to the cent,
-' e.g. 2.5 x 16.91 = 42.275 stored as 42.28)
+' Two rates within half a cent are treated as equal, so a rate stored to fewer
+' decimal places than the NT rate it is compared against still passes
 Private Const TOL As Double = 0.0051
 
 Private Const CLR_ERR As Long = 13551615     ' light red
@@ -45,7 +45,6 @@ Private Const ERR_COLS As Long = 11
 Private Const RULE_NONE As Long = 0
 Private Const RULE_EQUALS_NT As Long = 1
 Private Const RULE_NEGATIVE_NT As Long = 2
-Private Const RULE_2_5_X_NT As Long = 3
 
 Private mWs As Worksheet
 Private mData As Variant
@@ -198,12 +197,10 @@ Public Sub RunAwardsCheck()
             needZeroClient = False
             empRule = RULE_NONE
             Select Case code
-                Case "AL", "ALCASH", "AL5", "PL"
+                Case "AL", "ALCASH", "AL5", "PL", "PHNW"
                     needZeroClient = True: empRule = RULE_EQUALS_NT
                 Case "WELLB", "COMLEA"
                     empRule = RULE_EQUALS_NT
-                Case "PHNW"
-                    needZeroClient = True: empRule = RULE_2_5_X_NT
                 Case Else
                     If MatchesNumPlusNum(code, "RDOACC") Then
                         needZeroClient = True: empRule = RULE_NEGATIVE_NT
@@ -251,9 +248,6 @@ Public Sub RunAwardsCheck()
                 Case RULE_NEGATIVE_NT
                     expected = -nt
                     ruleText = code & ": employee rate should be negative NT employee rate"
-                Case RULE_2_5_X_NT
-                    expected = nt * 2.5
-                    ruleText = code & ": employee rate should be 2.5 x NT employee rate"
             End Select
             If Abs(ToNum(mData(r, COL_EMP)) - expected) > TOL Then
                 AddError r, ruleText, nt, expected, COL_EMP
