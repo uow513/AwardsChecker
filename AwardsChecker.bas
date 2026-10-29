@@ -4,15 +4,19 @@ Option Explicit
 ' AWARDS CHECKER
 ' Run the macro "RunAwardsCheck" while the Awards file is the active workbook.
 '
-' Step 1  Cleanse: numbers sitting in column T (PAY_ADDITIONS) where column R
-'         (PAY_EMPLOYEERATE) is blank are moved into column R.
-' Step 2  Builds a unique list of Job Levels (column D & column I) and runs the
-'         pay item validations on every row.
+' Everything happens in a single pass over the data:
+'   - numbers sitting in column T (PAY_ADDITIONS) where column R
+'     (PAY_EMPLOYEERATE) is blank are moved into column R;
+'   - the unique list of job levels (column D & column I) is built;
+'   - the NT employee rate for each job level / award is recorded;
+'   - every check that does not need the NT rate is run immediately.
+' A row's NT rate can appear below it in the file, so the NT-based comparisons
+' are queued during the pass and resolved straight afterwards.
 '
 ' Output sheets (re-created each run):
 '   Cleanse Log        - every value moved from T to R
 '   Job Levels         - unique job level list with error counts
-'   Validation Errors  - one line per failed rule
+'   Validation Errors  - one line per failed rule, sorted by Awards row
 ' Failed rate cells on the Awards sheet are shaded red; moved cells yellow.
 '==============================================================================
 
@@ -37,10 +41,18 @@ Private Const CLR_OK As Long = 13561798      ' light green
 
 Private Const ERR_COLS As Long = 11
 
+' Employee rate rules
+Private Const RULE_NONE As Long = 0
+Private Const RULE_EQUALS_NT As Long = 1
+Private Const RULE_NEGATIVE_NT As Long = 2
+Private Const RULE_2_5_X_NT As Long = 3
+
 Private mWs As Worksheet
 Private mData As Variant
 Private mErrs() As Variant
 Private mErrCount As Long
+Private mLv() As Variant          ' Job Levels sheet rows
+Private mDLevel As Object         ' job level -> index into mLv
 
 Public Sub RunAwardsCheck()
     Dim wb As Workbook
@@ -87,15 +99,40 @@ Public Sub RunAwardsCheck()
     ' Clear shading from a previous run
     ws.Range(ws.Cells(2, COL_EMP), ws.Cells(lastRow, COL_CLIENT)).Interior.ColorIndex = xlNone
 
-    Dim r As Long
-
     '--------------------------------------------------------------------------
-    ' STEP 1: cleanse - move numbers from T to R
+    ' Working stores
     '--------------------------------------------------------------------------
     Dim logArr() As Variant, logCount As Long, movedCount As Long
     ReDim logArr(1 To lastRow, 1 To 6)
 
+    ' Job Levels columns: 1 Job Level, 2 AJB_DESCRIPTION, 3 ALV_DESCRIPTION,
+    ' 4 Award(s), 5 No. of Awards, 6 Pay Items, 7 NT Employee Rate, 8 Errors, 9 Status
+    ReDim mLv(1 To lastRow, 1 To 9)
+    Dim nLv As Long
+    Set mDLevel = CreateObject("Scripting.Dictionary")
+
+    Dim dNT As Object
+    Set dNT = CreateObject("Scripting.Dictionary")   ' job level|award -> NT employee rate
+
+    ReDim mErrs(1 To lastRow * 4, 1 To ERR_COLS)
+    mErrCount = 0
+
+    ' Queued NT-based comparisons: 1 = Awards row, 2 = rule
+    Dim pend() As Variant, nPend As Long
+    ReDim pend(1 To lastRow, 1 To 2)
+
+    Dim r As Long, idx As Long, i As Long
+    Dim key As String, award As String, code As String, ntKey As String
+    Dim emp As Double, client As Double, nt As Double, expected As Double
+    Dim needZeroClient As Boolean, empRule As Long
+    Dim ruleText As String
+
+    '--------------------------------------------------------------------------
+    ' THE PASS
+    '--------------------------------------------------------------------------
     For r = 2 To lastRow
+
+        ' --- cleanse: move a number in column T into column R -----------------
         If IsNum(mData(r, COL_ADD)) Then
             logCount = logCount + 1
             logArr(logCount, 1) = r
@@ -116,144 +153,116 @@ Public Sub RunAwardsCheck()
                 logArr(logCount, 6) = "NOT moved - column R already has a value, please review"
             End If
         End If
-    Next r
 
-    '--------------------------------------------------------------------------
-    ' STEP 2a: unique job levels + NT employee rate per job level / award
-    '--------------------------------------------------------------------------
-    Dim dLevel As Object, dNT As Object, dNTSeen As Object
-    Set dLevel = CreateObject("Scripting.Dictionary")
-    Set dNT = CreateObject("Scripting.Dictionary")
-    Set dNTSeen = CreateObject("Scripting.Dictionary")
-
-    ' Job Levels columns: 1 Job Level, 2 AJB_DESCRIPTION, 3 ALV_DESCRIPTION, 4 Award(s),
-    ' 5 No. of Awards, 6 Pay Items, 7 NT Employee Rate, 8 Errors, 9 Status
-    Dim lv() As Variant, nLv As Long
-    ReDim lv(1 To lastRow, 1 To 9)
-
-    Dim key As String, award As String, code As String, ntKey As String
-    Dim idx As Long
-
-    For r = 2 To lastRow
-        If RowHasData(r) Then
-            key = JobKey(r)
-            award = SafeStr(mData(r, COL_AWARD))
-            If Not dLevel.Exists(key) Then
-                nLv = nLv + 1
-                dLevel.Add key, nLv
-                lv(nLv, 1) = key
-                lv(nLv, 2) = SafeStr(mData(r, COL_JOB))
-                lv(nLv, 3) = SafeStr(mData(r, COL_LEVEL))
-                lv(nLv, 4) = award
-                lv(nLv, 5) = 1
-                lv(nLv, 6) = 0
-                lv(nLv, 7) = "(no NT row)"
-                lv(nLv, 8) = 0
-            Else
-                idx = dLevel(key)
-                If InStr(1, "; " & lv(idx, 4) & ";", "; " & award & ";", vbBinaryCompare) = 0 Then
-                    lv(idx, 4) = lv(idx, 4) & "; " & award
-                    lv(idx, 5) = lv(idx, 5) + 1
-                End If
-            End If
-            idx = dLevel(key)
-            lv(idx, 6) = lv(idx, 6) + 1
-
-            If PayCode(r) = "NT" Then
-                ntKey = key & "|" & award
-                If Not dNT.Exists(ntKey) Then
-                    dNT.Add ntKey, ToNum(mData(r, COL_EMP))
-                    If VarType(lv(idx, 7)) = vbString Then lv(idx, 7) = ToNum(mData(r, COL_EMP))
-                End If
-            End If
-        End If
-    Next r
-
-    '--------------------------------------------------------------------------
-    ' STEP 2b: validations
-    '--------------------------------------------------------------------------
-    ReDim mErrs(1 To lastRow * 4, 1 To ERR_COLS)
-    mErrCount = 0
-
-    Dim emp As Double, client As Double, nt As Double, expected As Double
-    Dim hasNT As Boolean, needZeroClient As Boolean
-    Dim empRule As Long, errsBefore As Long
-    Dim ruleText As String
-
-    For r = 2 To lastRow
         If RowHasData(r) Then
             key = JobKey(r)
             award = SafeStr(mData(r, COL_AWARD))
             code = PayCode(r)
-            emp = ToNum(mData(r, COL_EMP))
+            emp = ToNum(mData(r, COL_EMP))       ' reads the cleansed value
             client = ToNum(mData(r, COL_CLIENT))
-            ntKey = key & "|" & award
-            hasNT = dNT.Exists(ntKey)
-            If hasNT Then nt = dNT(ntKey) Else nt = 0
-            errsBefore = mErrCount
 
+            ' --- unique job level ---------------------------------------------
+            If Not mDLevel.Exists(key) Then
+                nLv = nLv + 1
+                mDLevel.Add key, nLv
+                mLv(nLv, 1) = key
+                mLv(nLv, 2) = SafeStr(mData(r, COL_JOB))
+                mLv(nLv, 3) = SafeStr(mData(r, COL_LEVEL))
+                mLv(nLv, 4) = award
+                mLv(nLv, 5) = 1
+                mLv(nLv, 6) = 0
+                mLv(nLv, 7) = "(no NT row)"
+                mLv(nLv, 8) = 0
+            Else
+                idx = mDLevel(key)
+                If InStr(1, "; " & mLv(idx, 4) & ";", "; " & award & ";", vbBinaryCompare) = 0 Then
+                    mLv(idx, 4) = mLv(idx, 4) & "; " & award
+                    mLv(idx, 5) = mLv(idx, 5) + 1
+                End If
+            End If
+            idx = mDLevel(key)
+            mLv(idx, 6) = mLv(idx, 6) + 1
+
+            ' --- NT baseline for this job level / award ------------------------
             If code = "NT" Then
-                If dNTSeen.Exists(ntKey) Then
-                    AddError r, "More than one NT row for this job level", nt, "", COL_EMP
+                ntKey = key & "|" & award
+                If dNT.Exists(ntKey) Then
+                    AddError r, "More than one NT row for this job level", dNT(ntKey), "", COL_EMP
                 Else
-                    dNTSeen.Add ntKey, True
+                    dNT.Add ntKey, emp
+                    If VarType(mLv(idx, 7)) = vbString Then mLv(idx, 7) = emp
                 End If
             End If
 
-            ' empRule: 0 = none, 1 = equals NT, 2 = negative NT, 3 = 2.5 x NT
+            ' --- which rules apply to this pay item ---------------------------
             needZeroClient = False
-            empRule = 0
+            empRule = RULE_NONE
             Select Case code
                 Case "AL", "ALCASH", "AL5", "PL"
-                    needZeroClient = True: empRule = 1
+                    needZeroClient = True: empRule = RULE_EQUALS_NT
                 Case "WELLB", "COMLEA"
-                    empRule = 1
+                    empRule = RULE_EQUALS_NT
                 Case "PHNW"
-                    needZeroClient = True: empRule = 3
+                    needZeroClient = True: empRule = RULE_2_5_X_NT
                 Case Else
                     If MatchesNumPlusNum(code, "RDOACC") Then
-                        needZeroClient = True: empRule = 2
+                        needZeroClient = True: empRule = RULE_NEGATIVE_NT
                     ElseIf MatchesNumPlusNum(code, "RDO") Then
-                        needZeroClient = True: empRule = 1
+                        needZeroClient = True: empRule = RULE_EQUALS_NT
                     End If
             End Select
 
+            ' --- checks that need nothing but this row -------------------------
             If needZeroClient And client <> 0 Then
-                AddError r, code & ": client rate should be 0", IIf(hasNT, nt, ""), 0, COL_CLIENT
-            End If
-
-            If empRule <> 0 Then
-                If Not hasNT Then
-                    AddError r, code & ": no NT row found for this job level, cannot check employee rate", "", "", COL_EMP
-                Else
-                    Select Case empRule
-                        Case 1
-                            expected = nt
-                            ruleText = code & ": employee rate should equal NT employee rate"
-                        Case 2
-                            expected = -nt
-                            ruleText = code & ": employee rate should be negative NT employee rate"
-                        Case 3
-                            expected = nt * 2.5
-                            ruleText = code & ": employee rate should be 2.5 x NT employee rate"
-                    End Select
-                    If Abs(emp - expected) > TOL Then
-                        AddError r, ruleText, nt, expected, COL_EMP
-                    End If
-                End If
+                AddError r, code & ": client rate should be 0", "", 0, COL_CLIENT
             End If
 
             If client <> 0 And Not (client > emp) Then
-                AddError r, code & ": client rate should be greater than employee rate", IIf(hasNT, nt, ""), "> " & Format$(emp, "0.0000"), COL_CLIENT
+                AddError r, code & ": client rate should be greater than employee rate", _
+                         "", "> " & Format$(emp, "0.0000"), COL_CLIENT
             End If
 
-            idx = dLevel(key)
-            lv(idx, 8) = lv(idx, 8) + (mErrCount - errsBefore)
+            ' --- queue the check that needs the NT rate ------------------------
+            If empRule <> RULE_NONE Then
+                nPend = nPend + 1
+                pend(nPend, 1) = r
+                pend(nPend, 2) = empRule
+            End If
         End If
     Next r
 
+    '--------------------------------------------------------------------------
+    ' Resolve the queued NT-based comparisons
+    '--------------------------------------------------------------------------
+    For i = 1 To nPend
+        r = pend(i, 1)
+        code = PayCode(r)
+        ntKey = JobKey(r) & "|" & SafeStr(mData(r, COL_AWARD))
+
+        If Not dNT.Exists(ntKey) Then
+            AddError r, code & ": no NT row found for this job level, cannot check employee rate", _
+                     "", "", COL_EMP
+        Else
+            nt = dNT(ntKey)
+            Select Case pend(i, 2)
+                Case RULE_EQUALS_NT
+                    expected = nt
+                    ruleText = code & ": employee rate should equal NT employee rate"
+                Case RULE_NEGATIVE_NT
+                    expected = -nt
+                    ruleText = code & ": employee rate should be negative NT employee rate"
+                Case RULE_2_5_X_NT
+                    expected = nt * 2.5
+                    ruleText = code & ": employee rate should be 2.5 x NT employee rate"
+            End Select
+            If Abs(ToNum(mData(r, COL_EMP)) - expected) > TOL Then
+                AddError r, ruleText, nt, expected, COL_EMP
+            End If
+        End If
+    Next i
+
     For idx = 1 To nLv
-        If lv(idx, 8) = 0 Then lv(idx, 9) = "OK" Else lv(idx, 9) = "Errors"
+        If mLv(idx, 8) = 0 Then mLv(idx, 9) = "OK" Else mLv(idx, 9) = "Errors"
     Next idx
 
     '--------------------------------------------------------------------------
@@ -261,7 +270,7 @@ Public Sub RunAwardsCheck()
     '--------------------------------------------------------------------------
     Dim shLog As Worksheet, shLv As Worksheet, shErr As Worksheet
 
-    Set shLog = PrepSheet(wb, "Cleanse Log", ws)
+    Set shLog = PrepSheet(wb, "Cleanse Log")
     WriteHeader shLog, Array("Awards Row", "Job Level", "Pay Code", "Value in T", "Employee Rate (R) now", "Action")
     If logCount > 0 Then
         shLog.Range("A2").Resize(logCount, 6).Value = logArr
@@ -271,11 +280,11 @@ Public Sub RunAwardsCheck()
     End If
     FinishSheet shLog, 6
 
-    Set shLv = PrepSheet(wb, "Job Levels", ws)
+    Set shLv = PrepSheet(wb, "Job Levels")
     WriteHeader shLv, Array("Job Level (D & I)", "AJB_DESCRIPTION", "ALV_DESCRIPTION", "Award(s)", _
                             "No. of Awards", "Pay Items", "NT Employee Rate", "Errors", "Status")
     If nLv > 0 Then
-        shLv.Range("A2").Resize(nLv, 9).Value = lv
+        shLv.Range("A2").Resize(nLv, 9).Value = mLv
         shLv.Range("G2").Resize(nLv, 1).NumberFormat = "0.0000"
         shLv.Range("A1").Resize(nLv + 1, 9).Sort Key1:=shLv.Range("A2"), Order1:=xlAscending, Header:=xlYes
         For idx = 2 To nLv + 1
@@ -288,12 +297,15 @@ Public Sub RunAwardsCheck()
     End If
     FinishSheet shLv, 9
 
-    Set shErr = PrepSheet(wb, "Validation Errors", ws)
+    Set shErr = PrepSheet(wb, "Validation Errors")
     WriteHeader shErr, Array("Awards Row", "Job Level (D & I)", "Award", "AJB_DESCRIPTION", "ALV_DESCRIPTION", _
                              "Pay Code", "Issue", "Employee Rate (R)", "Client Rate (S)", "NT Employee Rate", "Expected")
     If mErrCount > 0 Then
         shErr.Range("A2").Resize(mErrCount, ERR_COLS).Value = mErrs
         shErr.Range("H2").Resize(mErrCount, 4).NumberFormat = "0.0000"
+        ' The queued checks are added after the pass, so restore Awards row order
+        shErr.Range("A1").Resize(mErrCount + 1, ERR_COLS).Sort _
+            Key1:=shErr.Range("A2"), Order1:=xlAscending, Header:=xlYes
     Else
         shErr.Range("A2").Value = "No validation errors found."
     End If
@@ -314,8 +326,10 @@ Public Sub RunAwardsCheck()
            "Validation errors:  " & mErrCount, vbInformation, "Awards Checker"
 
     Erase mErrs
+    Erase mLv
     mData = Empty
     Set mWs = Nothing
+    Set mDLevel = Nothing
     Exit Sub
 
 CleanFail:
@@ -328,8 +342,12 @@ End Sub
 ' Helpers
 '------------------------------------------------------------------------------
 
+' Records one failed check, shades the offending cell, and counts the error
+' against its job level.
 Private Sub AddError(ByVal r As Long, ByVal issue As String, ByVal ntRate As Variant, _
                      ByVal expected As Variant, ByVal highlightCol As Long)
+    Dim key As String
+
     mErrCount = mErrCount + 1
     mErrs(mErrCount, 1) = r
     mErrs(mErrCount, 2) = JobKey(r)
@@ -342,7 +360,11 @@ Private Sub AddError(ByVal r As Long, ByVal issue As String, ByVal ntRate As Var
     If IsBlank(mData(r, COL_CLIENT)) Then mErrs(mErrCount, 9) = "" Else mErrs(mErrCount, 9) = ToNum(mData(r, COL_CLIENT))
     mErrs(mErrCount, 10) = ntRate
     mErrs(mErrCount, 11) = expected
+
     mWs.Cells(r, highlightCol).Interior.Color = CLR_ERR
+
+    key = JobKey(r)
+    If mDLevel.Exists(key) Then mLv(mDLevel(key), 8) = mLv(mDLevel(key), 8) + 1
 End Sub
 
 Private Function FindAwardsSheet(ByVal wb As Workbook) As Worksheet
@@ -356,7 +378,7 @@ Private Function FindAwardsSheet(ByVal wb As Workbook) As Worksheet
     Next sh
 End Function
 
-Private Function PrepSheet(ByVal wb As Workbook, ByVal sheetName As String, ByVal dataSheet As Worksheet) As Worksheet
+Private Function PrepSheet(ByVal wb As Workbook, ByVal sheetName As String) As Worksheet
     Dim sh As Worksheet
     On Error Resume Next
     Set sh = wb.Worksheets(sheetName)

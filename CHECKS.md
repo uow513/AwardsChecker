@@ -21,7 +21,22 @@ name starts with `Awards` (a CSV opened in Excel is named after the file, e.g. `
 Headers on R, S and T are verified at startup. If they don't match, the macro asks before
 continuing. A row is skipped entirely when D, I and K are all empty.
 
-## Step 1 — Cleanse
+## How it runs
+
+Everything below happens in a **single pass** over the data rows. The pass cleanses column T,
+builds the job level list, records the NT rate for each job level and award, and runs every
+check that needs nothing but the row in front of it.
+
+The one exception is the comparison against the NT rate: a row's NT row can sit below it in
+the file, so that comparison can't be settled the moment the row is read. Those comparisons
+are queued during the pass and resolved immediately after it, against the finished set of NT
+rates. The queue is much smaller than the data, and the result is identical to checking each
+row in place.
+
+Because those queued results arrive last, the Validation Errors sheet is sorted by Awards row
+number before it's handed back.
+
+## Cleanse
 
 Column T holds numbers that belong in column R.
 
@@ -33,7 +48,8 @@ Column T holds numbers that belong in column R.
 
 Every row with a number in T is listed on the **Cleanse Log** sheet, moved or not.
 
-Step 2 runs against the cleansed values, so a rate moved out of T is validated like any other.
+The validations read the cleansed value, so a rate moved out of T is checked like any other —
+the move happens earlier in the same pass over the row.
 
 ## The job level
 
@@ -51,7 +67,7 @@ NT rate from its own award.
 If a job level has no NT row at all, every rule that needs the baseline reports
 "no NT row found for this job level" rather than passing silently.
 
-## Step 2 — Validations
+## Validations
 
 `<n>` below means digits, optionally with one decimal point — so `RDO38+2`, `RDO36+4` and
 `RDO38+2.5` all match, while `RDOCO` does not.
@@ -91,7 +107,7 @@ Three sheets, rebuilt from scratch on each run:
 |---|---|
 | **Cleanse Log** | Every row with a number in column T: row number, job level, pay code, the value, the resulting employee rate, and whether it was moved |
 | **Job Levels** | The unique job level list: both source columns, the award(s) it appears under, how many awards share it, pay item count, NT employee rate, error count, and OK/Errors |
-| **Validation Errors** | One row per failed check: Awards row number, job level, award, pay code, the issue, the actual employee and client rates, the NT rate, and the expected value |
+| **Validation Errors** | One row per failed check, sorted by Awards row number: the row number, job level, award, pay code, the issue, the actual employee and client rates, the NT rate, and the expected value |
 
 On the Awards sheet itself, failing rate cells are shaded red and cells moved in step 1 are
 shaded yellow. Both shadings are cleared at the start of the next run.
